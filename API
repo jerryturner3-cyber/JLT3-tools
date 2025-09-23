@@ -1,4 +1,0 @@
-/JLT3-Tools (repository root)
-├── package.json              # Node.js package file with dependencies
-└── api/
-    └── polish-resume.ts      # Serverless function for polishing resume bullets
