@@ -6,6 +6,7 @@
   "license": "MIT",
   "dependencies": {
     "openai": "^5.0.0"
+    "formidable": "^3.5.0"
   },
   "devDependencies": {
     "@vercel/node": "^5.3.22",
