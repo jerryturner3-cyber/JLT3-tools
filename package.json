@@ -1,0 +1,14 @@
+{
+  "name": "resume-bullet-polisher",
+  "version": "1.0.0",
+  "description": "Backend for the Resume Bullet Polisher tool",
+  "main": "api/polish-resume.ts",
+  "license": "MIT",
+  "dependencies": {
+    "openai": "^5.0.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^5.3.22",
+    "typescript": "^5.2.0"
+  }
+}
