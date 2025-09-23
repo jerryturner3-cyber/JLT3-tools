@@ -1,17 +1,15 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import OpenAI from 'openai';
 
-// Allow your domains + the Vercel domain for testing
 const ALLOWED_ORIGINS = [
   'https://jerryleonturner3.com',
   'https://www.jerryleonturner3.com',
   'https://jlt-3-tools.vercel.app'
 ];
 
-// simple in-memory rate limiter per IP (resets on cold start)
 type Rec = { count: number; start: number };
 const hits: Record<string, Rec> = {};
-const WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const WINDOW_MS = 60 * 60 * 1000;
 const MAX_HITS = 10;
 
 function setCors(res: VercelResponse, origin?: string) {
@@ -27,7 +25,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
 
-  // rate limit
+  // Quick env check
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: 'Server misconfigured: OPENAI_API_KEY is missing.' });
+  }
+
+  // Rate limit
   const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
     || req.socket.remoteAddress || 'unknown';
   const now = Date.now();
@@ -36,8 +39,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   rec.count += 1; hits[ip] = rec;
   if (rec.count > MAX_HITS) return res.status(429).json({ error: 'Too many requests' });
 
-  // body + validation
-  const text = (req.body?.text || req.body?.bullet || '').toString().trim();
+  // Parse body (works if body is object or raw string)
+  let text = '';
+  if (typeof req.body === 'string') text = req.body.trim();
+  else if (req.body && typeof req.body === 'object') text = String(req.body.text || req.body.bullet || '').trim();
+
   if (!text) return res.status(400).json({ error: 'Missing "text" in JSON body.' });
   if (text.split(/\s+/).filter(Boolean).length < 8) {
     return res.status(400).json({ error: 'Please provide at least 8 words.' });
@@ -45,7 +51,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const sys = 'You are an expert resume writer. Rewrite resume bullets with strong action verbs, measurable impact, and clarity. Return concise one-sentence options and avoid buzzword fluff.';
+
+    const sys = 'You are an expert resume writer. Rewrite resume bullets with strong action verbs, measurable impact, and clarity. Return 3 concise one-sentence options; avoid fluff.';
     const user = `Rewrite this resume bullet and give me 3 distinct one-sentence options:\n"${text}"`;
 
     const resp = await openai.chat.completions.create({
@@ -59,15 +66,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
     const raw = resp.choices?.[0]?.message?.content || '';
-    const options = raw
-      .split(/\n+/)
-      .map(s => s.replace(/^\d+[\).]\s*|- \s*/,'').trim())
+    const options = raw.split(/\n+/)
+      .map(s => s.replace(/^\d+[\).]\s*|- \s*/, '').trim())
       .filter(Boolean)
       .slice(0, 3);
 
     return res.status(200).json({ options });
-  } catch (e: any) {
-    console.error('polish-resume error', e?.response?.data || e?.message || e);
-    return res.status(500).json({ error: 'Server error' });
+  } catch (err: any) {
+    // Log server-side and return a helpful payload for debugging
+    console.error('OpenAI error:', err?.response?.status, err?.response?.data || err?.message || err);
+    return res.status(500).json({
+      error: 'OpenAI request failed',
+      detail: err?.response?.data || err?.message || 'Unknown error'
+    });
   }
 }
+
