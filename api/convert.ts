@@ -128,8 +128,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ? 'application/pdf'
       : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
-    res.setHeader('Content-Type', outMime);
+    res.setHeader("Content-Type", "application/pdf");
     res.setHeader('Content-Disposition', `attachment; filename="${outNameBase}${outExt}"`);
+    res.send(fileBuffer);
     return res.status(200).send(outBuf);
   } catch (err: any) {
     console.error('convert error:', err?.message || err);
