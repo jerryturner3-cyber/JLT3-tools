@@ -7,7 +7,7 @@
   "dependencies": {
     "openai": "^5.0.0",
     "formidable": "^3.5.0",
-     "form-data": "^4.0.0"
+    "form-data": "^4.0.0"
   },
   "devDependencies": {
     "@vercel/node": "^5.3.22",
