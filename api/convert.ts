@@ -3,7 +3,6 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { IncomingForm, File } from 'formidable';
 import fs from 'fs';
 import path from 'path';
-import FormData from 'form-data';
 
 export const config = { api: { bodyParser: false } };
 
@@ -12,7 +11,6 @@ const ALLOWED_ORIGINS = [
   'https://www.jerryleonturner3.com',
   'https://jlt-3-tools.vercel.app',
 ];
-
 const MAX_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 function setCors(res: VercelResponse, origin?: string) {
@@ -41,9 +39,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
 
-  if (!process.env.CONVERTAPI_SECRET) {
-    return res.status(500).json({ error: 'Server misconfigured: CONVERTAPI_SECRET is missing.' });
-  }
+  const SECRET = process.env.CONVERTAPI_SECRET;
+  if (!SECRET) return res.status(500).json({ error: 'Server misconfigured: CONVERTAPI_SECRET is missing.' });
 
   const to = String((req.query.to || '').toString().toLowerCase());
   if (to !== 'pdf' && to !== 'docx') {
@@ -57,9 +54,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const ext = path.extname(file.originalFilename || '').toLowerCase();
     const mime = file.mimetype || '';
     const size = file.size || 0;
-    if (size > MAX_SIZE_BYTES) {
-      return res.status(413).json({ error: `File too large. Max ${Math.round(MAX_SIZE_BYTES / 1024 / 1024)}MB` });
-    }
+    if (size > MAX_SIZE_BYTES) return res.status(413).json({ error: `File too large. Max ${Math.round(MAX_SIZE_BYTES/1024/1024)}MB` });
 
     if (to === 'pdf' && !(ext === '.docx' || mime.includes('word'))) {
       return res.status(400).json({ error: 'For ?to=pdf please upload a DOCX (.docx) file.' });
@@ -68,48 +63,76 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'For ?to=docx please upload a PDF (.pdf) file.' });
     }
 
+    // 1) Upload the file to ConvertAPI — returns FileId
     const buffer = await fs.promises.readFile(file.filepath);
+    const uploadForm = new FormData();
+    uploadForm.append('file', new Blob([buffer]), file.originalFilename || `upload${ext || ''}`);
 
-    const endpoint =
+    const uploadResp = await fetch(`https://v2.convertapi.com/upload?Secret=${SECRET}`, {
+      method: 'POST',
+      body: uploadForm
+    });
+
+    const uploadText = await uploadResp.text();
+    let uploadJson: any;
+    try { uploadJson = JSON.parse(uploadText); } catch {
+      return res.status(502).json({ error: 'Upload failed (non-JSON)', detail: uploadText.slice(0, 1000) });
+    }
+    const fileId: string | undefined = uploadJson?.FileId || uploadJson?.fileId;
+    if (!uploadResp.ok || !fileId) {
+      return res.status(502).json({ error: 'Upload failed', detail: uploadJson });
+    }
+
+    // 2) Convert using FileId via JSON body
+    const convertUrl =
       to === 'pdf'
-        ? `https://v2.convertapi.com/convert/docx/to/pdf?Secret=${process.env.CONVERTAPI_SECRET}`
-        : `https://v2.convertapi.com/convert/pdf/to/docx?Secret=${process.env.CONVERTAPI_SECRET}`;
+        ? `https://v2.convertapi.com/convert/docx/to/pdf?Secret=${SECRET}`
+        : `https://v2.convertapi.com/convert/pdf/to/docx?Secret=${SECRET}`;
 
-    const form = new FormData();
-    form.append('file', buffer, { filename: file.originalFilename || `upload${ext || ''}` });
+    const convertBody = {
+      Parameters: [
+        { Name: 'File', FileValue: { Id: fileId } }
+      ]
+    };
 
-    const upstream = await fetch(endpoint, { method: 'POST', body: form as any, headers: form.getHeaders() as any });
-    if (!upstream.ok) {
-      const text = await upstream.text().catch(() => '');
-      return res.status(502).json({ error: 'Conversion upstream failed', detail: text.slice(0, 500) });
+    const convertResp = await fetch(convertUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(convertBody)
+    });
+
+    const convertText = await convertResp.text();
+    let convertJson: any;
+    try { convertJson = JSON.parse(convertText); } catch {
+      return res.status(502).json({ error: 'Conversion response not JSON', detail: convertText.slice(0, 1000) });
     }
 
-    const json = await upstream.json();
-    const url: string | undefined = json?.Files?.[0]?.Url || json?.files?.[0]?.url;
-    if (!url) {
-      return res.status(502).json({ error: 'Conversion succeeded but no file URL returned.' });
+    if (!convertResp.ok) {
+      return res.status(502).json({ error: 'Conversion upstream failed', detail: convertJson });
     }
 
+    const url: string | undefined = convertJson?.Files?.[0]?.Url || convertJson?.files?.[0]?.url;
+    if (!url) return res.status(502).json({ error: 'Conversion succeeded but no file URL returned.', detail: convertJson });
+
+    // 3) Download the converted file and return to client
     const converted = await fetch(url);
     if (!converted.ok) {
       const t = await converted.text().catch(() => '');
-      return res.status(502).json({ error: 'Failed to fetch converted file', detail: t.slice(0, 500) });
+      return res.status(502).json({ error: 'Failed to fetch converted file', detail: t.slice(0, 1000) });
     }
 
     const outBuf = Buffer.from(await converted.arrayBuffer());
     const outNameBase = (file.originalFilename || 'resume').replace(/\.[^.]+$/, '');
     const outExt = to === 'pdf' ? '.pdf' : '.docx';
-    const outMime =
-      to === 'pdf'
-        ? 'application/pdf'
-        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const outMime = to === 'pdf'
+      ? 'application/pdf'
+      : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
     res.setHeader('Content-Type', outMime);
     res.setHeader('Content-Disposition', `attachment; filename="${outNameBase}${outExt}"`);
     return res.status(200).send(outBuf);
   } catch (err: any) {
     console.error('convert error:', err?.message || err);
-    // CORS headers already set at top, so browser will see this JSON
-    return res.status(500).json({ error: 'Server error during conversion' });
+    return res.status(500).json({ error: 'Server error during conversion', detail: err?.message || String(err) });
   }
 }
