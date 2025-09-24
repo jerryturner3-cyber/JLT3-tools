@@ -6,12 +6,14 @@ import path from 'path';
 
 export const config = { api: { bodyParser: false } };
 
+// Allowed origins for browser calls
 const ALLOWED_ORIGINS = [
   'https://jerryleonturner3.com',
   'https://www.jerryleonturner3.com',
-  'https://jlt-3-tools.vercel.app',
+  'https://jlt-3-tools.vercel.app', // keep for testing
 ];
-const MAX_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+const MAX_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
 
 function setCors(res: VercelResponse, origin?: string) {
   const allowed = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[2];
@@ -54,8 +56,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const ext = path.extname(file.originalFilename || '').toLowerCase();
     const mime = file.mimetype || '';
     const size = file.size || 0;
-    if (size > MAX_SIZE_BYTES) return res.status(413).json({ error: `File too large. Max ${Math.round(MAX_SIZE_BYTES/1024/1024)}MB` });
+    if (size > MAX_SIZE_BYTES) {
+      return res.status(413).json({ error: `File too large. Max ${Math.round(MAX_SIZE_BYTES/1024/1024)}MB` });
+    }
 
+    // Validate input type
     if (to === 'pdf' && !(ext === '.docx' || mime.includes('word'))) {
       return res.status(400).json({ error: 'For ?to=pdf please upload a DOCX (.docx) file.' });
     }
@@ -63,7 +68,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'For ?to=docx please upload a PDF (.pdf) file.' });
     }
 
-    // 1) Upload the file to ConvertAPI — returns FileId
+    // ---- 1) Upload to ConvertAPI to get a FileId ----
     const buffer = await fs.promises.readFile(file.filepath);
     const uploadForm = new FormData();
     uploadForm.append('file', new Blob([buffer]), file.originalFilename || `upload${ext || ''}`);
@@ -83,7 +88,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(502).json({ error: 'Upload failed', detail: uploadJson });
     }
 
-    // 2) Convert using FileId via JSON body
+    // ---- 2) Convert using FileId via JSON ----
     const convertUrl =
       to === 'pdf'
         ? `https://v2.convertapi.com/convert/docx/to/pdf?Secret=${SECRET}`
@@ -111,26 +116,44 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(502).json({ error: 'Conversion upstream failed', detail: convertJson });
     }
 
-    const url: string | undefined = convertJson?.Files?.[0]?.Url || convertJson?.files?.[0]?.url;
-    if (!url) return res.status(502).json({ error: 'Conversion succeeded but no file URL returned.', detail: convertJson });
-
-    // 3) Download the converted file and return to client
-    const converted = await fetch(url);
-    if (!converted.ok) {
-      const t = await converted.text().catch(() => '');
-      return res.status(502).json({ error: 'Failed to fetch converted file', detail: t.slice(0, 1000) });
+    // ConvertAPI sometimes returns:
+    //   Files[0].Url  (preferred)
+    // or Files[0].FileData (base64)
+    const fileEntry = (convertJson?.Files && convertJson.Files[0]) || (convertJson?.files && convertJson.files[0]);
+    if (!fileEntry) {
+      return res.status(502).json({ error: 'Conversion succeeded but no file returned.', detail: convertJson });
     }
 
-    const outBuf = Buffer.from(await converted.arrayBuffer());
+    let outBuf: Buffer | null = null;
+
+    if (fileEntry.Url) {
+      // Download the file from the returned URL
+      const converted = await fetch(fileEntry.Url);
+      if (!converted.ok) {
+        const t = await converted.text().catch(() => '');
+        return res.status(502).json({ error: 'Failed to fetch converted file', detail: t.slice(0, 1000) });
+      }
+      outBuf = Buffer.from(await converted.arrayBuffer());
+    } else if (fileEntry.FileData) {
+      // Base64 file content
+      try {
+        outBuf = Buffer.from(fileEntry.FileData, 'base64');
+      } catch {
+        return res.status(502).json({ error: 'Invalid FileData base64 in conversion response.' });
+      }
+    } else {
+      return res.status(502).json({ error: 'Conversion succeeded but no file URL or data returned.', detail: convertJson });
+    }
+
     const outNameBase = (file.originalFilename || 'resume').replace(/\.[^.]+$/, '');
     const outExt = to === 'pdf' ? '.pdf' : '.docx';
-    const outMime = to === 'pdf'
-      ? 'application/pdf'
-      : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const outMime =
+      to === 'pdf'
+        ? 'application/pdf'
+        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
-    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader('Content-Type', outMime);
     res.setHeader('Content-Disposition', `attachment; filename="${outNameBase}${outExt}"`);
-    res.send(fileBuffer);
     return res.status(200).send(outBuf);
   } catch (err: any) {
     console.error('convert error:', err?.message || err);
