@@ -1,4 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { setCors } from '../utils/cors';
+
 
 /* ---------------- CORS (env-driven, same style as subnet-calc) ---------------- */
 const DEFAULT_ALLOWED = [
