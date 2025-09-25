@@ -1,84 +1,103 @@
+// /api/polish-resume.ts
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import OpenAI from 'openai';
 
-const ALLOWED_ORIGINS = [
+/* ---------- CORS (share with your other endpoints) ---------- */
+const DEFAULT_ALLOWED = [
   'https://jerryleonturner3.com',
   'https://www.jerryleonturner3.com',
-  'https://jlt-3-tools.vercel.app'
+  'https://jlt-3-tools.vercel.app',
+  'https://jacybersecurity.com',
+  'https://www.jacybersecurity.com',
 ];
-
-type Rec = { count: number; start: number };
-const hits: Record<string, Rec> = {};
-const WINDOW_MS = 60 * 60 * 1000;
-const MAX_HITS = 10;
-
+function getAllowedOrigins(): string[] {
+  const csv = process.env.ALLOWED_ORIGINS?.trim();
+  if (!csv) return DEFAULT_ALLOWED;
+  return csv.split(/[, \s]+/).filter(Boolean);
+}
 function setCors(res: VercelResponse, origin?: string) {
-  const allowed = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[2];
+  const allowedList = getAllowedOrigins();
+  const allowed = origin && allowedList.includes(origin) ? origin : allowedList[0];
   res.setHeader('Access-Control-Allow-Origin', allowed);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Vary', 'Origin');
 }
 
+/* ---------- Prompt builders ---------- */
+function buildSystemPrompt(domain: 'general' | 'cyber') {
+  if (domain === 'cyber') {
+    return [
+      'You improve resume bullets for cybersecurity roles.',
+      'Guidelines:',
+      '- Use strong action verbs: hardened, mitigated, secured, automated, audited, remediated.',
+      '- Where plausible, add quantification (%, time, counts) and scope.',
+      '- Prefer industry language + frameworks: NIST CSF/800-53, ISO 27001, SOC 2, CIS, MITRE ATT&CK.',
+      '- Mention common platforms/tools when appropriate: SIEM, EDR, SOAR, Cloud (AWS/GCP/Azure), IAM, DLP, vuln mgmt, patching.',
+      '- Keep one sentence per bullet. No emojis. No personal pronouns.',
+      'Return exactly three variations, concise and achievement-focused.',
+    ].join('\n');
+  }
+  // default: general
+  return [
+    'You improve resume bullets for general roles.',
+    'Guidelines:',
+    '- Use strong action verbs and measurable outcomes.',
+    '- Keep it one sentence, concise, results-first.',
+    'Return exactly three variations.',
+  ].join('\n');
+}
+
+function buildUserPrompt(text: string) {
+  return `Original bullet:\n${text}\n\nRewrite 3 improved bullets (concise, one line each).`;
+}
+
+/* ---------- Handler ---------- */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCors(res, req.headers.origin as string | undefined);
   if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
-
-  // Quick env check
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: 'Server misconfigured: OPENAI_API_KEY is missing.' });
-  }
-
-  // Rate limit
-  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
-    || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  const rec = hits[ip] || { count: 0, start: now };
-  if (now - rec.start > WINDOW_MS) { rec.count = 0; rec.start = now; }
-  rec.count += 1; hits[ip] = rec;
-  if (rec.count > MAX_HITS) return res.status(429).json({ error: 'Too many requests' });
-
-  // Parse body (works if body is object or raw string)
-  let text = '';
-  if (typeof req.body === 'string') text = req.body.trim();
-  else if (req.body && typeof req.body === 'object') text = String(req.body.text || req.body.bullet || '').trim();
-
-  if (!text) return res.status(400).json({ error: 'Missing "text" in JSON body.' });
-  if (text.split(/\s+/).filter(Boolean).length < 8) {
-    return res.status(400).json({ error: 'Please provide at least 8 words.' });
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const { text, domain } = (req.body || {}) as { text?: string; domain?: string };
+    const modeQuery = (req.query?.mode as string) || ''; // also allow ?mode=cyber
+    const dom = (domain || modeQuery || 'general').toLowerCase() === 'cyber' ? 'cyber' : 'general';
 
-    const sys = 'You are an expert resume writer. Rewrite resume bullets with strong action verbs, measurable impact, and clarity. Return 3 concise one-sentence options; avoid fluff.';
-    const user = `Rewrite this resume bullet and give me 3 distinct one-sentence options:\n"${text}"`;
+    if (!text || typeof text !== 'string' || text.split(/\s+/).filter(Boolean).length < 8) {
+      return res.status(400).json({ error: 'Please provide a bullet with at least 8 words.' });
+    }
 
-    const resp = await openai.chat.completions.create({
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const system = buildSystemPrompt(dom as 'general' | 'cyber');
+    const user = buildUserPrompt(text);
+
+    // You can use any model you’ve budgeted for; 4o-mini is a good cost/speed balance.
+    const completion = await client.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: user }
+        { role: 'system', content: system },
+        { role: 'user', content: user },
       ],
       temperature: 0.7,
-      max_tokens: 300
     });
 
-    const raw = resp.choices?.[0]?.message?.content || '';
-    const options = raw.split(/\n+/)
-      .map(s => s.replace(/^\d+[\).]\s*|- \s*/, '').trim())
+    const content = completion.choices[0]?.message?.content || '';
+    // Try to split into 3 lines robustly
+    const lines = content
+      .split(/\n+/)
+      .map(s => s.replace(/^\s*[-*\d.)]+\s*/, '').trim())
       .filter(Boolean)
       .slice(0, 3);
 
-    return res.status(200).json({ options });
-  } catch (err: any) {
-    // Log server-side and return a helpful payload for debugging
-    console.error('OpenAI error:', err?.response?.status, err?.response?.data || err?.message || err);
-    return res.status(500).json({
-      error: 'OpenAI request failed',
-      detail: err?.response?.data || err?.message || 'Unknown error'
-    });
+    if (lines.length < 3) {
+      return res.status(200).json({ options: [content].filter(Boolean) });
+    }
+
+    return res.status(200).json({ options: lines, domain: dom });
+  } catch (e: any) {
+    console.error('polish-resume error:', e?.message || e);
+    // Surface OpenAI errors cleanly to the frontend
+    const detail = typeof e?.message === 'string' ? e.message : 'OpenAI request failed';
+    return res.status(500).json({ error: 'Server error', detail });
   }
 }
-
