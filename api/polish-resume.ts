@@ -1,6 +1,9 @@
 // /api/polish-resume.ts
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import OpenAI from 'openai';
+import { setCors } from '../utils/cors';
+
+
 
 /* ---------- CORS (share with your other endpoints) ---------- */
 const DEFAULT_ALLOWED = [
