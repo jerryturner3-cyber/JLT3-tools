@@ -3,6 +3,8 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { IncomingForm, File } from 'formidable';
 import fs from 'fs';
 import path from 'path';
+import { setCors } from '../utils/cors';
+
 
 export const config = { api: { bodyParser: false } };
 
