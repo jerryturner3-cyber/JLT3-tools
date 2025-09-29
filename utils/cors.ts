@@ -48,3 +48,14 @@ function setCors(res: any, origin?: string) {
   );
   res.setHeader('Vary', 'Origin');
 }
+export function applyCors(req: any, res: any) {
+  setCors(res, req.headers.origin);
+
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return true;
+  }
+  return false;
+}
+
